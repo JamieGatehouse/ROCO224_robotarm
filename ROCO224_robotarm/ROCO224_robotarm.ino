@@ -43,7 +43,7 @@ int currentWristRoll = HOME_POSITION;
 int currentGripper = HOME_POSITION;
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   Serial.println("6-DOF Robot Arm Controller");
   
   // Initialize PWM driver
@@ -118,7 +118,16 @@ void moveToHome() {
 // Inverse kinematics calculation
 bool inverseKinematics(float x, float y, float z, int *baseAngle, int *shoulderAngle, int *elbowAngle, int *wristPitchAngle) {
   // Calculate base angle (rotation around y-axis)
+  // Adjust the calculation to ensure operations stay on surface
+  // The atan2 function returns angles in radians, convert to degrees
   *baseAngle = round(atan2(y, x) * 180 / PI);
+  
+  // Clamp base angle to prevent moving too far right
+  if (*baseAngle > 45) *baseAngle = 45;
+  if (*baseAngle < -45) *baseAngle = -45;
+  
+  // Map to servo angle (90 is centered)
+  *baseAngle = 90 + *baseAngle;
   
   // Convert to reach distance in the arm plane
   float r = sqrt(x*x + y*y);
@@ -142,6 +151,9 @@ bool inverseKinematics(float x, float y, float z, int *baseAngle, int *shoulderA
   // Calculate angles using law of cosines
   float cosElbow = (pow(LENGTH_SHOULDER_TO_ELBOW, 2) + pow(LENGTH_ELBOW_TO_WRIST, 2) - pow(shoulderToWrist, 2)) / 
                    (2 * LENGTH_SHOULDER_TO_ELBOW * LENGTH_ELBOW_TO_WRIST);
+  
+  // Ensure cosElbow is within valid range to avoid NaN
+  cosElbow = constrain(cosElbow, -1.0, 1.0);
   
   // Elbow angle - invert because servo is mounted in opposite direction
   *elbowAngle = 180 - round(acos(cosElbow) * 180 / PI);
@@ -168,8 +180,9 @@ void moveArmToPosition(float x, float y, float z) {
   Serial.print(z); Serial.println(")");
   
   if (inverseKinematics(x, y, z, &baseAngle, &shoulderAngle, &elbowAngle, &wristPitchAngle)) {
-    // Move base
+    // Move base first
     moveServoSmooth(BASE_SERVO, &currentBase, baseAngle, STEP_DELAY);
+    delay(200); // Add small delay after base rotation
     
     // Move shoulder and elbow simultaneously
     int shoulderSteps = abs(shoulderAngle - currentShoulder);
@@ -218,7 +231,8 @@ void executeBeakerTask() {
   delay(500);
   
   // Move to beaker position (40cm in front, 10cm to the left)
-  moveArmToPosition(40, -10, 0);
+  // Adjust Z to -10 (10cm lower) to properly pick up the beaker from the ground
+  moveArmToPosition(40, -10, -10);
   delay(500);
   
   // Close gripper to grab beaker
@@ -238,12 +252,17 @@ void executeBeakerTask() {
   moveArmToPosition(40, 10, 10);
   delay(1000);
   
+  // Save the current wrist roll position before pouring
+  int initialWristRoll = currentWristRoll;
+  
   // Pour beaker (clockwise rotation)
   Serial.println("Pouring beaker");
-  for (int angle = currentWristRoll; angle <= currentWristRoll + 90; angle += POUR_STEP) {
+  int targetAngle = initialWristRoll + 90; // 90 degrees clockwise
+  
+  for (int angle = initialWristRoll; angle <= targetAngle; angle += POUR_STEP) {
     setServoPosition(WRIST_ROLL, angle);
+    currentWristRoll = angle; // Update current position with each step
     delay(STEP_DELAY * 2);  // Slower pour
-    currentWristRoll = angle;
   }
   
   // Hold for 3 seconds
@@ -251,10 +270,11 @@ void executeBeakerTask() {
   
   // Return beaker to upright position
   Serial.println("Returning beaker to upright position");
-  for (int angle = currentWristRoll; angle >= currentWristRoll - 90; angle -= POUR_STEP) {
+  
+  for (int angle = currentWristRoll; angle >= initialWristRoll; angle -= POUR_STEP) {
     setServoPosition(WRIST_ROLL, angle);
+    currentWristRoll = angle; // Update current position with each step
     delay(STEP_DELAY * 2);  // Slower rotation
-    currentWristRoll = angle;
   }
   delay(500);
   
@@ -262,8 +282,8 @@ void executeBeakerTask() {
   moveArmToPosition(40, -10, 20);
   delay(500);
   
-  // Lower to ground
-  moveArmToPosition(40, -10, 0);
+  // Lower to ground (adjusted to -10cm)
+  moveArmToPosition(40, -10, -10);
   delay(500);
   
   // Release beaker
