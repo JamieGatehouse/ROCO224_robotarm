@@ -1,391 +1,281 @@
-/*
- * Robot Arm Control using ESP32 and PCA9685 PWM Controller
- * Uses inverse kinematics and ramp functions for smooth motion
- * Adjusted servo positions -90 degrees from default
- */
-
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
 #include <math.h>
 
-// Create a PCA9685 PWM servo driver object
+// Create servo driver instance
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 
-// Define servo min and max pulse lengths
-// ADJUST THESE VALUES based on your specific servos!
-#define SERVO_MIN_PULSE  150 // Minimum pulse length count (out of 4096)
-#define SERVO_MAX_PULSE  600 // Maximum pulse length count (out of 4096)
+// Define servo channels
+#define BASE_SERVO      0
+#define SHOULDER_SERVO  1
+#define ELBOW_SERVO     2
+#define WRIST_PITCH     3
+#define WRIST_ROLL      4
+#define GRIPPER         5
 
-// Define servo angles
-#define SERVO_MIN_ANGLE  0
-#define SERVO_MAX_ANGLE  180
+// Define servo pulse ranges (microseconds)
+#define SERVO_MIN_PULSE   600
+#define SERVO_MAX_PULSE   2400
+#define SERVO_FREQ        50  // 50 Hz update frequency
 
-// Define servos
-#define BASE_SERVO       0  // Base rotation
-#define SHOULDER_SERVO   1  // Shoulder joint
-#define ELBOW_SERVO      2  // Elbow joint
-#define WRIST_SERVO      3  // Wrist pitch
-#define GRIPPER_SERVO    4  // Gripper
+// Arm dimensions (cm)
+#define HEIGHT_BASE_TO_SHOULDER  10
+#define LENGTH_SHOULDER_TO_ELBOW 15
+#define LENGTH_ELBOW_TO_WRIST    15
+#define LENGTH_WRIST_TO_EFFECTOR 20
 
-// Updated arm dimensions (in cm)
-const float SHOULDER_LENGTH = 15.0;
-const float ELBOW_LENGTH = 15.0;
-const float WRIST_LENGTH = 13.0;
+// Servo positions (degrees)
+#define HOME_POSITION    90
+#define GRIPPER_OPEN     0
+#define GRIPPER_CLOSED   70
 
-// Home position (in degrees) - adjusted by -90 degrees
-const float HOME_BASE = 0.0;       // Changed from 90 to 0
-const float HOME_SHOULDER = 0.0;   // Changed from 90 to 0
-const float HOME_ELBOW = 0.0;      // Changed from 90 to 0
-const float HOME_WRIST = 0.0;      // Changed from 90 to 0
+// Movement parameters
+#define STEP_DELAY       15    // Delay between steps (ms)
+#define ANGLE_STEP       1     // Step size for smooth movement (degrees)
+#define POUR_STEP        2     // Smaller step for pouring (degrees)
 
-// Current angles (in degrees)
-float currentBase = HOME_BASE;
-float currentShoulder = HOME_SHOULDER;
-float currentElbow = HOME_ELBOW;
-float currentWrist = HOME_WRIST;
-
-// Gripper positions
-const int GRIPPER_OPEN = 10;     // Adjusted for -90 degree offset
-const int GRIPPER_CLOSED = -80;  // Adjusted for -90 degree offset
-
-// Task positions (in cm) - Adjust these for your setup!
-const float BEAKER_X = 20.0;
-const float BEAKER_Y = 5.0;
-const float BEAKER_Z = 5.0;
-
-const float GLASS_X = 10.0;
-const float GLASS_Y = 15.0;
-const float GLASS_Z = 5.0;
-
-// Ramp implementation for smooth motion
-class Ramp {
-  private:
-    float startValue;
-    float targetValue;
-    float currentValue;
-    unsigned long startTime;
-    unsigned long duration;
-    bool isActive;
-
-  public:
-    Ramp() {
-      startValue = 0;
-      targetValue = 0;
-      currentValue = 0;
-      startTime = 0;
-      duration = 1000; // Default 1 second
-      isActive = false;
-    }
-
-    void start(float start, float target, unsigned long durationMs) {
-      startValue = start;
-      targetValue = target;
-      currentValue = start;
-      duration = durationMs;
-      startTime = millis();
-      isActive = true;
-    }
-
-    float update() {
-      if (!isActive) return currentValue;
-      
-      unsigned long currentTime = millis();
-      unsigned long elapsedTime = currentTime - startTime;
-      
-      if (elapsedTime >= duration) {
-        currentValue = targetValue;
-        isActive = false;
-        return currentValue;
-      }
-      
-      // Calculate smooth S-curve (ease in/out)
-      float progress = (float)elapsedTime / duration;
-      float smoothProgress = 0.5 - 0.5 * cos(PI * progress);
-      currentValue = startValue + (targetValue - startValue) * smoothProgress;
-      
-      return currentValue;
-    }
-
-    bool isDone() {
-      return !isActive;
-    }
-};
-
-// Create ramp objects for each servo
-Ramp baseRamp;
-Ramp shoulderRamp;
-Ramp elbowRamp;
-Ramp wristRamp;
+// Current positions
+int currentBase = HOME_POSITION;
+int currentShoulder = HOME_POSITION;
+int currentElbow = HOME_POSITION;
+int currentWristPitch = HOME_POSITION;
+int currentWristRoll = HOME_POSITION;
+int currentGripper = HOME_POSITION;
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("Robot Arm Control System");
+  Serial.println("6-DOF Robot Arm Controller");
   
-  // Initialize I2C
-  Wire.begin();
-  
-  // Initialize the PCA9685
+  // Initialize PWM driver
   pwm.begin();
-  pwm.setPWMFreq(50);  // Standard servo frequency (50Hz)
+  pwm.setPWMFreq(SERVO_FREQ);
   
-  delay(10);
+  delay(1000);  // Allow time for servos to initialize
   
-  // Initialize to home position
-  delay(500);
+  // Move to home position
   moveToHome();
-  delay(1000);
+  delay(2000);
+  
+  // Execute the beaker task sequence
+  executeBeakerTask();
 }
 
 void loop() {
-  // Main program - execute water pouring task once
-  pourWaterTask();
-  
-  // Wait before repeating
-  delay(5000);
+  // Main program execution is done in setup
+  // This allows the program to run once
 }
 
-// Map angle in degrees to pulse width for PCA9685
-// Adjusted to handle -90 to +90 degree range instead of 0 to 180
-int angleToPulse(float angle) {
-  // Add 90 degrees to shift the -90 to +90 range to 0 to 180
-  float adjustedAngle = angle + 90.0;
-  
-  // Constrain to valid range
-  adjustedAngle = constrain(adjustedAngle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
-  
-  // Map adjusted angle to pulse length
-  return map(adjustedAngle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE, SERVO_MIN_PULSE, SERVO_MAX_PULSE);
+// Convert degrees to PWM pulsewidth
+int degreesToPulse(int degrees) {
+  // Map degrees (0-180) to pulse width (600-2400)
+  return map(degrees, 0, 180, SERVO_MIN_PULSE, SERVO_MAX_PULSE);
 }
 
 // Set servo position directly
-void setServo(uint8_t servoNum, float angle) {
-  int pulse = angleToPulse(angle);
-  pwm.setPWM(servoNum, 0, pulse);
+void setServoPosition(uint8_t servoNum, int degrees) {
+  int pulse = degreesToPulse(degrees);
+  pwm.writeMicroseconds(servoNum, pulse);
 }
 
-// Move all servos to specified angles
-void moveServos(float baseAngle, float shoulderAngle, float elbowAngle, float wristAngle) {
-  setServo(BASE_SERVO, baseAngle);
-  setServo(SHOULDER_SERVO, shoulderAngle);
-  setServo(ELBOW_SERVO, elbowAngle);
-  setServo(WRIST_SERVO, wristAngle);
+// Move servo with smooth transition
+void moveServoSmooth(uint8_t servoNum, int *currentPos, int targetPos, int stepDelay) {
+  // Determine direction
+  int stepDir = (*currentPos < targetPos) ? ANGLE_STEP : -ANGLE_STEP;
   
-  // Update current positions
-  currentBase = baseAngle;
-  currentShoulder = shoulderAngle;
-  currentElbow = elbowAngle;
-  currentWrist = wristAngle;
-}
-
-// Move servos with ramping for smooth motion
-void moveServosSmooth(float baseAngle, float shoulderAngle, float elbowAngle, float wristAngle, unsigned long durationMs) {
-  // Start ramps for each servo
-  baseRamp.start(currentBase, baseAngle, durationMs);
-  shoulderRamp.start(currentShoulder, shoulderAngle, durationMs);
-  elbowRamp.start(currentElbow, elbowAngle, durationMs);
-  wristRamp.start(currentWrist, wristAngle, durationMs);
-  
-  unsigned long startTime = millis();
-  
-  // Update servos until all movements are complete
-  while (!baseRamp.isDone() || !shoulderRamp.isDone() || !elbowRamp.isDone() || !wristRamp.isDone()) {
-    // Update each servo position based on ramp
-    float newBase = baseRamp.update();
-    float newShoulder = shoulderRamp.update();
-    float newElbow = elbowRamp.update();
-    float newWrist = wristRamp.update();
-    
-    // Set servo positions
-    setServo(BASE_SERVO, newBase);
-    setServo(SHOULDER_SERVO, newShoulder);
-    setServo(ELBOW_SERVO, newElbow);
-    setServo(WRIST_SERVO, newWrist);
-    
-    // Update current positions
-    currentBase = newBase;
-    currentShoulder = newShoulder;
-    currentElbow = newElbow;
-    currentWrist = newWrist;
-    
-    delay(20); // Small delay to prevent overloading the I2C bus
+  // Move in small steps
+  while (abs(*currentPos - targetPos) > ANGLE_STEP) {
+    *currentPos += stepDir;
+    setServoPosition(servoNum, *currentPos);
+    delay(stepDelay);
   }
   
-  Serial.println("Move completed in " + String(millis() - startTime) + "ms");
+  // Set final position
+  *currentPos = targetPos;
+  setServoPosition(servoNum, *currentPos);
 }
 
-// Open the gripper
-void openGripper() {
-  setServo(GRIPPER_SERVO, GRIPPER_OPEN);
-  Serial.println("Gripper opened");
-  delay(500); // Allow time for gripper to open
-}
-
-// Close the gripper
-void closeGripper() {
-  setServo(GRIPPER_SERVO, GRIPPER_CLOSED);
-  Serial.println("Gripper closed");
-  delay(500); // Allow time for gripper to close
-}
-
-// Move to home position
+// Move the arm to home position
 void moveToHome() {
-  Serial.println("Moving to home position");
-  moveServosSmooth(HOME_BASE, HOME_SHOULDER, HOME_ELBOW, HOME_WRIST, 1500);
-  openGripper();
+  // Move servos to home position simultaneously
+  setServoPosition(BASE_SERVO, HOME_POSITION);
+  setServoPosition(SHOULDER_SERVO, HOME_POSITION);
+  setServoPosition(ELBOW_SERVO, HOME_POSITION);
+  setServoPosition(WRIST_PITCH, HOME_POSITION);
+  setServoPosition(WRIST_ROLL, HOME_POSITION);
+  setServoPosition(GRIPPER, HOME_POSITION);
+  
+  // Update current positions
+  currentBase = HOME_POSITION;
+  currentShoulder = HOME_POSITION;
+  currentElbow = HOME_POSITION;
+  currentWristPitch = HOME_POSITION;
+  currentWristRoll = HOME_POSITION;
+  currentGripper = HOME_POSITION;
+  
+  Serial.println("Moved to home position");
 }
 
-// Inverse kinematics calculation - adjusted for -90 degree servo offset
-// Calculate joint angles for a given end effector position
-bool inverseKinematics(float x, float y, float z, float &baseAngle, float &shoulderAngle, float &elbowAngle, float &wristAngle) {
-  // Calculate base angle (rotation around the z-axis)
-  baseAngle = atan2(y, x) * 180.0 / PI;
-  // Adjusted base angle for -90 degree offset
-  baseAngle -= 90.0;
+// Inverse kinematics calculation
+bool inverseKinematics(float x, float y, float z, int *baseAngle, int *shoulderAngle, int *elbowAngle, int *wristPitchAngle) {
+  // Calculate base angle (rotation around y-axis)
+  *baseAngle = round(atan2(y, x) * 180 / PI);
   
-  // Adjust x and y to get the distance in the plane of the arm
+  // Convert to reach distance in the arm plane
   float r = sqrt(x*x + y*y);
   
-  // Calculate the position for the wrist
-  float wx = r;
-  float wz = z;
+  // Adjust for the wrist to reach the target point
+  r -= LENGTH_WRIST_TO_EFFECTOR;
   
-  // Arm length (distance from shoulder to wrist)
-  float arm_length = sqrt(wx*wx + wz*wz);
+  // Calculate the height from the shoulder
+  float adjustedZ = z - HEIGHT_BASE_TO_SHOULDER;
   
-  // Check if the position is reachable
-  if (arm_length > (SHOULDER_LENGTH + ELBOW_LENGTH)) {
-    Serial.println("Position out of reach");
+  // Calculate distance from shoulder to wrist
+  float shoulderToWrist = sqrt(r*r + adjustedZ*adjustedZ);
+  
+  // Check if the point is reachable
+  if (shoulderToWrist > (LENGTH_SHOULDER_TO_ELBOW + LENGTH_ELBOW_TO_WRIST) || 
+      shoulderToWrist < abs(LENGTH_SHOULDER_TO_ELBOW - LENGTH_ELBOW_TO_WRIST)) {
+    Serial.println("Position not reachable!");
     return false;
   }
   
-  // Law of cosines to find elbow angle
-  float cos_elbow = (wx*wx + wz*wz - SHOULDER_LENGTH*SHOULDER_LENGTH - ELBOW_LENGTH*ELBOW_LENGTH) / 
-                   (2 * SHOULDER_LENGTH * ELBOW_LENGTH);
-                   
-  // Constrain to prevent NaN due to floating point errors
-  if (cos_elbow < -1.0) cos_elbow = -1.0;
-  if (cos_elbow > 1.0) cos_elbow = 1.0;
+  // Calculate angles using law of cosines
+  float cosElbow = (pow(LENGTH_SHOULDER_TO_ELBOW, 2) + pow(LENGTH_ELBOW_TO_WRIST, 2) - pow(shoulderToWrist, 2)) / 
+                   (2 * LENGTH_SHOULDER_TO_ELBOW * LENGTH_ELBOW_TO_WRIST);
   
-  // Elbow angle (always positive in this configuration)
-  elbowAngle = acos(cos_elbow) * 180.0 / PI;
-  // In servo coordinate system (adjust as needed) and apply -90 offset
-  elbowAngle = 90.0 - elbowAngle;  // Adjusted from 180-elbowAngle
+  // Elbow angle - invert because servo is mounted in opposite direction
+  *elbowAngle = 180 - round(acos(cosElbow) * 180 / PI);
   
   // Calculate shoulder angle
-  float phi = atan2(wz, wx);
-  float psi = atan2(ELBOW_LENGTH * sin(acos(cos_elbow)), 
-                   SHOULDER_LENGTH + ELBOW_LENGTH * cos_elbow);
-  shoulderAngle = (phi - psi) * 180.0 / PI;
+  float gamma = atan2(adjustedZ, r);
+  float alpha = acos((pow(LENGTH_SHOULDER_TO_ELBOW, 2) + pow(shoulderToWrist, 2) - pow(LENGTH_ELBOW_TO_WRIST, 2)) / 
+                     (2 * LENGTH_SHOULDER_TO_ELBOW * shoulderToWrist));
+  *shoulderAngle = round((gamma + alpha) * 180 / PI);
   
-  // Adjust shoulder angle for servo coordinate system and -90 offset
-  shoulderAngle = 0.0 - shoulderAngle;  // Adjusted from 90-shoulderAngle
-  
-  // Set wrist angle to keep end effector level and apply -90 offset
-  wristAngle = 0.0 - shoulderAngle - elbowAngle;  // Adjusted from 90-shoulderAngle-(180-elbowAngle)
-  
-  // Constrain angles to valid servo ranges (-90 to +90)
-  if (baseAngle > 90) baseAngle = 90;
-  if (baseAngle < -90) baseAngle = -90;
-  
-  if (shoulderAngle > 90) shoulderAngle = 90;
-  if (shoulderAngle < -90) shoulderAngle = -90;
-  
-  if (elbowAngle > 90) elbowAngle = 90;
-  if (elbowAngle < -90) elbowAngle = -90;
-  
-  if (wristAngle > 90) wristAngle = 90;
-  if (wristAngle < -90) wristAngle = -90;
+  // Calculate wrist pitch to keep end effector horizontal
+  *wristPitchAngle = 180 - *shoulderAngle - (180 - *elbowAngle);
   
   return true;
 }
 
-// Move to a position in 3D space
-bool moveToPosition(float x, float y, float z, unsigned long durationMs) {
-  float baseAngle, shoulderAngle, elbowAngle, wristAngle;
+// Move the arm to a specific position
+void moveArmToPosition(float x, float y, float z) {
+  int baseAngle, shoulderAngle, elbowAngle, wristPitchAngle;
   
   Serial.print("Moving to position (");
-  Serial.print(x);
-  Serial.print(", ");
-  Serial.print(y);
-  Serial.print(", ");
-  Serial.print(z);
-  Serial.println(")");
+  Serial.print(x); Serial.print(", ");
+  Serial.print(y); Serial.print(", ");
+  Serial.print(z); Serial.println(")");
   
-  if (inverseKinematics(x, y, z, baseAngle, shoulderAngle, elbowAngle, wristAngle)) {
-    Serial.print("IK solution: Base=");
-    Serial.print(baseAngle);
-    Serial.print(", Shoulder=");
-    Serial.print(shoulderAngle);
-    Serial.print(", Elbow=");
-    Serial.print(elbowAngle);
-    Serial.print(", Wrist=");
-    Serial.println(wristAngle);
+  if (inverseKinematics(x, y, z, &baseAngle, &shoulderAngle, &elbowAngle, &wristPitchAngle)) {
+    // Move base
+    moveServoSmooth(BASE_SERVO, &currentBase, baseAngle, STEP_DELAY);
     
-    // Move servos smoothly to the calculated position
-    moveServosSmooth(baseAngle, shoulderAngle, elbowAngle, wristAngle, durationMs);
-    return true;
+    // Move shoulder and elbow simultaneously
+    int shoulderSteps = abs(shoulderAngle - currentShoulder);
+    int elbowSteps = abs(elbowAngle - currentElbow);
+    int maxSteps = max(shoulderSteps, elbowSteps);
+    
+    if (maxSteps > 0) {
+      float shoulderStep = (shoulderAngle - currentShoulder) / (float)maxSteps;
+      float elbowStep = (elbowAngle - currentElbow) / (float)maxSteps;
+      
+      float currentShoulderPos = currentShoulder;
+      float currentElbowPos = currentElbow;
+      
+      for (int i = 0; i < maxSteps; i++) {
+        currentShoulderPos += shoulderStep;
+        currentElbowPos += elbowStep;
+        
+        setServoPosition(SHOULDER_SERVO, round(currentShoulderPos));
+        setServoPosition(ELBOW_SERVO, round(currentElbowPos));
+        delay(STEP_DELAY);
+      }
+    }
+    
+    // Set final positions
+    setServoPosition(SHOULDER_SERVO, shoulderAngle);
+    setServoPosition(ELBOW_SERVO, elbowAngle);
+    
+    // Update current positions
+    currentShoulder = shoulderAngle;
+    currentElbow = elbowAngle;
+    
+    // Move wrist pitch
+    moveServoSmooth(WRIST_PITCH, &currentWristPitch, wristPitchAngle, STEP_DELAY);
+    
+    Serial.println("Position reached");
   } else {
-    Serial.println("Failed to find IK solution");
-    return false;
+    Serial.println("Failed to calculate inverse kinematics");
   }
 }
 
-// Pour water task
-void pourWaterTask() {
-  Serial.println("Starting water pouring task");
+// Execute the beaker task sequence
+void executeBeakerTask() {
+  // Open gripper
+  Serial.println("Opening gripper");
+  moveServoSmooth(GRIPPER, &currentGripper, GRIPPER_OPEN, STEP_DELAY);
+  delay(500);
   
-  // 1. Start at home position
+  // Move to beaker position (40cm in front, 10cm to the left)
+  moveArmToPosition(40, -10, 0);
+  delay(500);
+  
+  // Close gripper to grab beaker
+  Serial.println("Grabbing beaker");
+  moveServoSmooth(GRIPPER, &currentGripper, GRIPPER_CLOSED, STEP_DELAY);
+  delay(1000);
+  
+  // Lift beaker 20cm off ground
+  moveArmToPosition(40, -10, 20);
+  delay(500);
+  
+  // Move to destination (40cm in front, 10cm to the right)
+  moveArmToPosition(40, 10, 20);
+  delay(500);
+  
+  // Lower to 10cm above ground
+  moveArmToPosition(40, 10, 10);
+  delay(1000);
+  
+  // Pour beaker (clockwise rotation)
+  Serial.println("Pouring beaker");
+  for (int angle = currentWristRoll; angle <= currentWristRoll + 90; angle += POUR_STEP) {
+    setServoPosition(WRIST_ROLL, angle);
+    delay(STEP_DELAY * 2);  // Slower pour
+    currentWristRoll = angle;
+  }
+  
+  // Hold for 3 seconds
+  delay(3000);
+  
+  // Return beaker to upright position
+  Serial.println("Returning beaker to upright position");
+  for (int angle = currentWristRoll; angle >= currentWristRoll - 90; angle -= POUR_STEP) {
+    setServoPosition(WRIST_ROLL, angle);
+    delay(STEP_DELAY * 2);  // Slower rotation
+    currentWristRoll = angle;
+  }
+  delay(500);
+  
+  // Return to original position
+  moveArmToPosition(40, -10, 20);
+  delay(500);
+  
+  // Lower to ground
+  moveArmToPosition(40, -10, 0);
+  delay(500);
+  
+  // Release beaker
+  Serial.println("Releasing beaker");
+  moveServoSmooth(GRIPPER, &currentGripper, GRIPPER_OPEN, STEP_DELAY);
+  delay(500);
+  
+  // Return to home position
+  Serial.println("Returning to home position");
   moveToHome();
-  delay(1000);
   
-  // 2. Move above beaker
-  moveToPosition(BEAKER_X, BEAKER_Y, BEAKER_Z + 5.0, 1500);
-  delay(500);
-  
-  // 3. Move down to beaker
-  moveToPosition(BEAKER_X, BEAKER_Y, BEAKER_Z, 1000);
-  delay(500);
-  
-  // 4. Close gripper to grab beaker
-  closeGripper();
-  delay(1000);
-  
-  // 5. Lift beaker up
-  moveToPosition(BEAKER_X, BEAKER_Y, BEAKER_Z + 7.0, 1000);
-  delay(500);
-  
-  // 6. Move to position above glass
-  moveToPosition(GLASS_X, GLASS_Y, GLASS_Z + 10.0, 2000);
-  delay(500);
-  
-  // 7. Pour water into glass (tilt wrist)
-  Serial.println("Pouring water");
-  float pourWrist = currentWrist - 45.0;  // Tilt 45 degrees to pour
-  moveServosSmooth(currentBase, currentShoulder, currentElbow, pourWrist, 1500);
-  delay(2000);  // Hold for pouring
-  
-  // 8. Return to upright position
-  moveServosSmooth(currentBase, currentShoulder, currentElbow, currentWrist + 45.0, 1500);
-  delay(500);
-  
-  // 9. Move back to position above beaker
-  moveToPosition(BEAKER_X, BEAKER_Y, BEAKER_Z + 7.0, 2000);
-  delay(500);
-  
-  // 10. Lower beaker to original position
-  moveToPosition(BEAKER_X, BEAKER_Y, BEAKER_Z, 1000);
-  delay(500);
-  
-  // 11. Release beaker
-  openGripper();
-  delay(1000);
-  
-  // 12. Move away from beaker
-  moveToPosition(BEAKER_X, BEAKER_Y, BEAKER_Z + 5.0, 1000);
-  delay(500);
-  
-  // 13. Return to home position
-  moveToHome();
-  
-  Serial.println("Water pouring task completed!");
+  // Wait 10 seconds before next operation
+  Serial.println("Task complete, waiting 10 seconds");
+  delay(10000);
 }
