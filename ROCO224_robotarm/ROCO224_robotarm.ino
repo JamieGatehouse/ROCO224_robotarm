@@ -26,8 +26,8 @@ Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 
 // Servo positions (degrees)
 #define HOME_POSITION    90
-#define GRIPPER_OPEN     0
-#define GRIPPER_CLOSED   70
+#define GRIPPER_OPEN     180
+#define GRIPPER_CLOSED   0
 
 // Movement parameters
 #define STEP_DELAY       15    // Delay between steps (ms)
@@ -235,6 +235,13 @@ void executeBeakerTask() {
   moveArmToPosition(40, -10, -10);
   delay(500);
   
+  // Set elbow and wrist pitch to 90 degrees for picking up
+  Serial.println("Adjusting elbow and wrist pitch to 90 degrees");
+  moveServoSmooth(ELBOW_SERVO, &currentElbow, 90, STEP_DELAY);
+  delay(300);
+  moveServoSmooth(WRIST_PITCH, &currentWristPitch, 90, STEP_DELAY);
+  delay(500);
+  
   // Close gripper to grab beaker
   Serial.println("Grabbing beaker");
   moveServoSmooth(GRIPPER, &currentGripper, GRIPPER_CLOSED, STEP_DELAY);
@@ -286,14 +293,66 @@ void executeBeakerTask() {
   moveArmToPosition(40, -10, -10);
   delay(500);
   
+  // Set elbow and wrist pitch to 90 degrees for dropping
+  Serial.println("Adjusting elbow and wrist pitch to 90 degrees");
+  moveServoSmooth(ELBOW_SERVO, &currentElbow, 90, STEP_DELAY);
+  delay(300);
+  moveServoSmooth(WRIST_PITCH, &currentWristPitch, 90, STEP_DELAY);
+  delay(500);
+  
   // Release beaker
   Serial.println("Releasing beaker");
   moveServoSmooth(GRIPPER, &currentGripper, GRIPPER_OPEN, STEP_DELAY);
   delay(500);
   
-  // Return to home position
+  // Return to home position with smooth transition
   Serial.println("Returning to home position");
-  moveToHome();
+  
+  // First lift arm slightly to avoid collision
+  moveServoSmooth(ELBOW_SERVO, &currentElbow, 110, STEP_DELAY);
+  delay(300);
+  
+  // Move servos to home position one by one with gentler transitions
+  moveServoSmooth(WRIST_ROLL, &currentWristRoll, HOME_POSITION, STEP_DELAY);
+  delay(200);
+  moveServoSmooth(WRIST_PITCH, &currentWristPitch, HOME_POSITION, STEP_DELAY);
+  delay(200);
+  
+  // Move shoulder and elbow together gradually
+  int shoulderSteps = abs(HOME_POSITION - currentShoulder);
+  int elbowSteps = abs(HOME_POSITION - currentElbow);
+  int maxSteps = max(shoulderSteps, elbowSteps);
+  
+  if (maxSteps > 0) {
+    float shoulderStep = (HOME_POSITION - currentShoulder) / (float)maxSteps;
+    float elbowStep = (HOME_POSITION - currentElbow) / (float)maxSteps;
+    
+    float currentShoulderPos = currentShoulder;
+    float currentElbowPos = currentElbow;
+    
+    for (int i = 0; i < maxSteps; i++) {
+      currentShoulderPos += shoulderStep;
+      currentElbowPos += elbowStep;
+      
+      setServoPosition(SHOULDER_SERVO, round(currentShoulderPos));
+      setServoPosition(ELBOW_SERVO, round(currentElbowPos));
+      delay(STEP_DELAY * 2); // Slower movement for smoother transition
+    }
+  }
+  
+  // Set final positions and update current positions
+  setServoPosition(SHOULDER_SERVO, HOME_POSITION);
+  setServoPosition(ELBOW_SERVO, HOME_POSITION);
+  currentShoulder = HOME_POSITION;
+  currentElbow = HOME_POSITION;
+  
+  // Finally move base
+  moveServoSmooth(BASE_SERVO, &currentBase, HOME_POSITION, STEP_DELAY);
+  
+  // Set gripper to home position
+  moveServoSmooth(GRIPPER, &currentGripper, HOME_POSITION, STEP_DELAY);
+  
+  Serial.println("Home position reached");
   
   // Wait 10 seconds before next operation
   Serial.println("Task complete, waiting 10 seconds");
